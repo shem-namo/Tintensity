@@ -1,0 +1,511 @@
+--[[--
+Tintensity by Learn Now FX.
+
+This fuse adds intense colorization and an alpha channel to images.
+This fuse also uses DCTL for GPU acceleration, and because of this
+only works in Resolve/Fusion 15+.  
+
+I would like to give a huge thanks Bryan Ray, He really taught me everything I know about fuses.
+I would also like to thank Sam Treadway, he really put a lot of effort into this fuse,
+Thanks to him you have not one, but 4 different Vibrance algorithms.
+I couldn't have done it without you guys!!
+
+I would also like to thank June Yu, Thibaud and the entire WSL community,
+for their/your help and support!!
+
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sub-license, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+----------------------------------------------------------------------
+
+It you have any issues with this fuse, or would like to report a bug,
+Please don't hesitate to contact me via Email @ namos737@gmail.com
+Thank you.
+
+Changelog:
+version 1.0, 11/03/2020:
+
+version 1.0, 11/03/2020:
+* Initial release
+
+--]]--
+
+
+FuRegisterClass("Tintensity", CT_Tool, {
+	REGS_Category = "Fuses\\Color",
+	REGS_OpIconString = "TNT",
+	REGS_OpDescription = "Tintensity",
+	REG_Version = 1.0,
+	REGS_Company = "Learn Now FX",
+	REGS_URL = "http://www.youtube.com/LearnNowFX",
+	REG_Fuse_NoEdit     = true,
+	REG_Fuse_NoReload   = true,	
+})
+
+
+VibranceParams = [[
+	float red;
+	float green;
+	float blue;
+	int mode;
+	float vibrance;
+	float csaturation;
+	float vsaturation;
+	float cgain;
+	float vgain;
+	float cgamma;
+	float vgamma;
+	int unmult;
+	int invert;
+	float again;
+	int preclipblack;
+	int preclipwhite;	
+	int clipblack;
+	int clipwhite;
+	int srcCompOrder;
+]]
+
+
+VibranceKernel = [[
+	__KERNEL__ void VibranceKernel(__CONSTANTREF__ VibranceParams *params, __TEXTURE2D__ src, __TEXTURE2D_WRITE__ dst) {
+		DEFINE_KERNEL_ITERATORS_XY(x, y);
+		float4 col = _tex2DVecN(src, x, y, params->srcCompOrder);
+		float luma = (col.x * 0.299f) + (col.y * 0.587f) + (col.z * 0.114f);
+		float vibrance = params->vibrance;
+
+   		//Pre-Colorization Clip Black:
+		if (params->preclipblack == 1) {
+			col.x = _fmaxf(col.x, 0.0f);
+			col.y = _fmaxf(col.y, 0.0f);
+			col.z = _fmaxf(col.z, 0.0f);
+		}
+
+
+		//Pre-Colorization Clip White:
+		if (params->preclipwhite == 1) {
+			col.x = _fminf(col.x, 1.0f);
+			col.y = _fminf(col.y, 1.0f);
+			col.z = _fminf(col.z, 1.0f);
+		}
+		// Pre-Colorization Saturation:
+		col.x = params->csaturation * col.x + (1.0f - params->csaturation) * luma;
+		col.y = params->csaturation * col.y + (1.0f - params->csaturation) * luma;
+		col.z = params->csaturation * col.z + (1.0f - params->csaturation) * luma;
+
+
+		// Colorization Gain:
+		col.x *= params->cgain;
+		col.y *= params->cgain;
+		col.z *= params->cgain;
+
+
+		// Colorization Gamma:
+		col.x = _powf(col.x, 1.0f / _fmaxf(params->cgamma, 0.01f));
+		col.y = _powf(col.y, 1.0f / _fmaxf(params->cgamma, 0.01f));
+		col.z = _powf(col.z, 1.0f / _fmaxf(params->cgamma, 0.01f));
+					
+ 
+		// UnMultiply:
+		if (params->unmult == 1) {
+			col.w *= (luma + params->again);
+		}
+
+
+		// Invert Source:
+		if (params->invert == 1) {
+			col.x = col.w * (1.0f - col.x);
+			col.y = col.w * (1.0f - col.y);
+			col.z = col.w * (1.0f - col.z);
+		}
+
+
+		// Color Picker:
+		col.x += params->red * col.x;
+		col.y += params->green * col.y;
+		col.z += params->blue * col.z;
+
+
+		// Vibrance:
+		float cMax = _fmaxf(col.x, _fmaxf(col.y, col.z)); //strongest color
+		float cMin = _fminf(col.x, _fminf(col.y, col.z)); //weakest color
+		float cSat = cMax - cMin; //Saturation
+		float cAverage = (col.x + col.y + col.z) / 3.0f;
+		float scale = 1.0f;
+		float lerpWith = 0.0f;
+
+			//Vibrant
+		if (params->mode == 0) {
+			scale = vibrance * (2.0f * (1.0f - cSat)); //Less Saturated given higher priority
+			if (cMax == col.x) { //special treatment when red is max
+				scale = vibrance * (fabs(col.y - col.z) / (cSat / cAverage)) * (1.0f - cSat);
+			}
+			scale = _fminf(1.0f, scale); //clamp
+			lerpWith = cMax;
+		}
+			//Basic
+		if (params->mode == 1) {
+			scale = vibrance * ( 0.25f * (1.0f - cAverage));
+			lerpWith = cMin;
+		}
+			//Dynamic
+		if (params->mode == 2) {
+			scale = vibrance * (1.0f - _copysignf(cAverage, vibrance));
+			lerpWith = cAverage;
+			
+			col.x = _fmaxf(col.x, 0.0f);
+			col.y = _fmaxf(col.y, 0.0f);
+			col.z = _fmaxf(col.z, 0.0f);			
+		}
+			//Power
+		if (params->mode == 3) {
+			scale = vibrance * (1.0f - _powf(cSat, 1.0f / (vibrance + 1.0f)));
+			scale = _fminf(1.0f, scale); //clamp
+			lerpWith = cSat;
+		}
+			//lerp
+		col.x += scale * (col.x - lerpWith);
+		col.y += scale * (col.y - lerpWith);
+		col.z += scale * (col.z - lerpWith);
+
+
+		// Post-vibrance Gain:
+		col.x *= params->vgain;
+		col.y *= params->vgain;
+		col.z *= params->vgain;
+
+
+		// Post-vibrance Gamma:
+		col.x = _powf(col.x, 1.0f / _fmaxf(params->vgamma, 0.01f));
+		col.y = _powf(col.y, 1.0f / _fmaxf(params->vgamma, 0.01f));
+		col.z = _powf(col.z, 1.0f / _fmaxf(params->vgamma, 0.01f));
+
+
+		// Post-Saturation:
+		col.x = params->vsaturation * col.x + (1.0f - params->vsaturation) * luma;
+		col.y = params->vsaturation * col.y + (1.0f - params->vsaturation) * luma;
+		col.z = params->vsaturation * col.z + (1.0f - params->vsaturation) * luma;
+
+
+		//Clip Black:
+		if (params->clipblack == 1) {
+			col.x = _fmaxf(col.x, 0.0f);
+			col.y = _fmaxf(col.y, 0.0f);
+			col.z = _fmaxf(col.z, 0.0f);
+		}
+
+
+		//Clip White:
+		if (params->clipwhite == 1) {
+			col.x = _fminf(col.x, 1.0f);
+			col.y = _fminf(col.y, 1.0f);
+			col.z = _fminf(col.z, 1.0f);
+		}
+
+
+		_tex2DVec4Write(dst, x, y, col);
+	}
+]]
+
+OpenDemoURL = [[
+-- Open a webpage window up using your default web browser
+	platform = (FuPLATFORM_WINDOWS and "Windows") or (FuPLATFORM_MAC and "Mac") or (FuPLATFORM_LINUX and "Linux")
+	function OpenURL(siteName, path)
+		if platform == "Windows" then
+			-- Running on Windows
+			command = "explorer \"" .. path .. "\""
+		elseif platform == "Mac" then
+			-- Running on Mac
+			command = "open \"" .. path .. "\" &"
+		elseif platform == "Linux" then
+			-- Running on Linux
+			command = "xdg-open \"" .. path .. "\" &"
+		else
+			print("[Error] There is an invalid Fusion platform detected")
+			return
+		end
+
+		os.execute(command)
+		-- print("[Launch Command] ", command)
+		print("[Opening URL] [" .. siteName .. "] " .. path)
+	end
+
+	OpenURL("Demo", "https://youtu.be/S8SL2W05Egk")
+]]
+
+function Create()
+	self:BeginControlNest("Pre-Colorization", "PreColorization", false, {})
+		InPreClipBlack = self:AddInput("Clip Black", "PreClipBlack", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "CheckboxControl",
+			INP_Integer         = true,
+			ICD_Width           = 0.51,
+			CC_LabelPosition = "Vertical",
+			INP_Default         = 0,
+			INP_External        = false,
+		})
+		InPreClipWhite = self:AddInput("Clip White", "PreClipWhite", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "CheckboxControl",
+			INP_Integer         = true,
+			ICD_Width           = 0.54,
+			CC_LabelPosition = "Vertical",
+			INP_Default         = 0,
+			INP_External        = false,
+		})
+	InCGain = self:AddInput("Gain", "PreGain", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 5,
+			ICD_Center          = 3,
+			INP_Default         = 1,
+		})
+		InCGamma = self:AddInput("Gamma", "PreGamma", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 2,
+			INP_Default         = 1,
+		})
+		InCSaturation = self:AddInput("Saturation", "Saturation", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 2,
+			INP_Default         = 1,
+		})				
+		InInvert = self:AddInput("Invert", "Invert", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "CheckboxControl",
+			INP_Integer         = true,
+			ICD_Width           = 1,
+			INP_Default         = 0,
+		})
+	self:EndControlNest()
+
+	self:BeginControlNest("Colorize", "Colorize", true, {})
+		InShowWheel = self:AddInput("Show Color Picker", "ShowAdvanced", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "CheckboxControl",
+			INP_Integer         = true,
+			ICD_Width           = 1.0,
+			INP_Default         = 1,
+			INP_External        = false,
+			INP_DoNotifyChanged = true,
+		})
+		InColorR = self:AddInput("Red", "Red", {
+			ICS_Name            = "Color",
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "ColorControl",
+			INP_Default         = 0,
+			INP_MaxScale        = 1.0,
+			ICD_Center          = 1.0,
+			INP_DoNotifyChanged = true,
+			CLRC_ShowWheel      = false,
+			IC_ControlGroup     = 1,
+			IC_ControlID        = 0,
+			IC_Visible          = true,
+		})
+		InColorG = self:AddInput("Green", "Green", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "ColorControl",
+			INP_Default         = 0,
+			INP_DoNotifyChanged = true,
+			IC_ControlGroup     = 1,
+			IC_ControlID        = 1,
+		})
+		InColorB = self:AddInput("Blue", "Blue", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "ColorControl",
+			INP_Default         = 0,
+			INP_DoNotifyChanged = true,
+			IC_ControlGroup     = 1,
+			IC_ControlID        = 2,
+		})
+	self:EndControlNest()
+
+	self:BeginControlNest("Intensity", "Intensity", true, {})
+		InVibranceMode = self:AddInput("Vibrance Mode", "VibranceMode", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "ComboControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 3,
+			INP_MinAllowed      = 0,
+			INP_MaxAllowed      = 3,
+			INP_Integer         = true,
+			ICD_Width           = 1.0,
+			CC_LabelPosition    = "Horizontal",
+			INP_DoNotifyChanged = true,
+			{ CCS_AddString     = "Vibrant", },
+			{ CCS_AddString     = "Basic", },
+			{ CCS_AddString     = "Dynamic", },
+			{ CCS_AddString     = "Power", },
+		})
+		InVibrance = self:AddInput("Vibrance", "Vibrance", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0.0,
+			INP_MaxScale        = 5.0,
+			ICD_Center          = 2.0,
+			INP_Default         = 0,
+		})
+		InVSaturation = self:AddInput("Post-Saturation", "PostSaturation", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 2,
+			INP_Default         = 1,
+		})
+		InVGain = self:AddInput("Post-Gain", "PostGain", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 5,
+			ICD_Center          = 3,
+			INP_Default         = 1,
+		})
+		InVGamma = self:AddInput("Post-Gamma", "PostGamma", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 2,
+			INP_Default         = 1,
+		})	
+		InClipBlack = self:AddInput("Clip Black", "Clip Black", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "CheckboxControl",
+			INP_Integer         = true,
+			ICD_Width           = 0.51,
+			CC_LabelPosition = "Vertical",
+			INP_Default         = 0,
+			INP_External        = false,
+		})
+		InClipWhite = self:AddInput("Clip White", "Clip White", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "CheckboxControl",
+			INP_Integer         = true,
+			ICD_Width           = 0.54,
+			CC_LabelPosition = "Vertical",
+			INP_Default         = 0,
+			INP_External        = false,
+		})				
+	self:EndControlNest()
+
+	self:BeginControlNest("Alpha", "Alpha", true, {})
+		InUnMultiply = self:AddInput("UnMultiply", "UnMultiply", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "CheckboxControl",
+			INP_Integer         = true,
+			INP_Default         = 0,
+			INP_DoNotifyChanged = true,			
+		})
+		InAlphaGain = self:AddInput("Alpha Boost", "Alpha Boost", {
+			LINKID_DataType     = "Number",
+			INPID_InputControl  = "SliderControl",
+			INP_MinScale        = 0,
+			INP_MaxScale        = 1,
+			INP_Default         = 0,
+  		    INP_Visible = false,		
+		})
+	self:EndControlNest()		
+
+	InImage = self:AddInput("Image", "Image", {
+		LINKID_DataType         = "Image",
+		LINK_Main               = 1,
+		INP_AcceptsGPUImages    = true,
+	})
+	OutImage = self:AddOutput("Output", "Output", {
+		LINKID_DataType         = "Image",
+		LINK_Main               = 1,
+	})
+
+	DemoButton = self:AddInput("Tutorial", "Tutorial", {
+		LINKS_Name          = "Tutorial",
+		LINKID_DataType     = "Number",
+		INPID_InputControl  = "ButtonControl",
+		BTNCS_Execute       = OpenDemoURL,
+		ICD_Width           = 1.0,
+	})
+end
+
+
+function NotifyChanged(inp, param, time)
+	if inp ~= nil and param ~= nil then
+		if inp == InShowWheel then
+			if param.Value == 1.0 then
+				InColorR:SetAttrs({ CLRC_ShowWheel = true, })
+			else
+				InColorR:SetAttrs({ CLRC_ShowWheel = false, })
+			end
+	elseif inp == InUnMultiply then   -- Update our sliders
+		local locked = (param.Value < 0.5)
+		
+		if locked then
+			InAlphaGain:SetAttrs({ IC_Visible = false })
+		else
+			InAlphaGain:SetAttrs({ IC_Visible = true })
+		  end
+	  end
+   end
+end
+
+
+		
+function Process(req)
+	local src = InImage:GetValue(req)
+	local node = DVIPComputeNode(req, "VibranceKernel", VibranceKernel, "VibranceParams", VibranceParams)
+	local params = node:GetParamBlock(VibranceParams)
+
+	params.red = InColorR:GetValue(req).Value
+	params.green = InColorG:GetValue(req).Value
+	params.blue = InColorB:GetValue(req).Value
+	params.mode = InVibranceMode:GetValue(req).Value
+	params.vibrance = InVibrance:GetValue(req).Value
+	params.csaturation = InCSaturation:GetValue(req).Value
+	params.vsaturation = InVSaturation:GetValue(req).Value
+	params.cgain = InCGain:GetValue(req).Value
+	params.vgain = InVGain:GetValue(req).Value
+	params.cgamma = InCGamma:GetValue(req).Value
+	params.vgamma = InVGamma:GetValue(req).Value
+	params.unmult = InUnMultiply:GetValue(req).Value
+	params.again = InAlphaGain:GetValue(req).Value
+	params.invert = InInvert:GetValue(req).Value
+	params.clipblack = InClipBlack:GetValue(req).Value
+	params.clipwhite = InClipWhite:GetValue(req).Value
+	params.preclipblack = InPreClipBlack:GetValue(req).Value
+	params.preclipwhite = InPreClipWhite:GetValue(req).Value		
+	params.srcCompOrder = src:IsMask() and 1 or 15
+
+	node:SetParamBlock(params)
+
+ local dst = Image{ IMG_Like = src, IMG_DeferAlloc = true }
+
+	node:AddInput("src", src)
+	node:AddOutput("dst", dst)
+
+	local ok = node:RunSession(req)
+
+	if not ok then
+		dst = nil
+	end
+
+	OutImage:Set(req, dst)
+	dst = nil
+	collectgarbage()
+end
